@@ -1,19 +1,8 @@
-import os
-import swifter
 import pandas as pd
-from typing import Tuple
+import swifter
 
-_AVG_ERROR = 0.25
-_SAMPLE = 10000
-_BALL_RADIUS = 0.12
-_PROB_REQ = 90
-_ZONE_RADIUS = 0.83
-_ZONE_WIDTH = _ZONE_RADIUS * 2
-X1 = -_ZONE_RADIUS
-X2 = X1 + _ZONE_WIDTH
-
-_DESCRIPTIONS = ["called_strike", "ball"]
-_USED_COLS = [
+FILTERED_DESCRIPTIONS = ["called_strike", "ball"]
+REQUIRED_COLUMNS = [
     "description",
     "sz_bot",
     "sz_top",
@@ -21,7 +10,7 @@ _USED_COLS = [
     "plate_z",
     "stand",
 ]
-_RETURN_COLS = [
+RETURN_COLUMNS = [
     "horizontal_miss_type",
     "horizontal_miss",
     "vertical_miss_type",
@@ -30,130 +19,103 @@ _RETURN_COLS = [
     "total_miss",
     "miss_delta_win_exp_impact",
 ]
+DEFAULT_RETURN = [None, 0.00, None, 0.00, None, 0.00, 0.00]
+
+AVG_ERROR = 0.25
+SAMPLE = 10000
+USE_ERROR_SAMPLE = False
+PROB_REQ = 90
+
+BALL_RADIUS = 0.12
+ZONE_RADIUS = 0.83
+ZONE_WIDTH = ZONE_RADIUS * 2
+X1 = -ZONE_RADIUS
+X2 = X1 + ZONE_WIDTH
 
 
-def generate_coords(
-    sz_bot: float, sz_top: float, plate_x: float, plate_z: float
-) -> dict:
-    """Generate Coordinates
+def _umpire_calls(p: pd.Series) -> tuple:
+    Y1 = p.sz_bot - BALL_RADIUS
+    Y2 = p.sz_top - BALL_RADIUS
+    X = p.plate_x
+    Y = p.plate_z
 
-    Parameters
-    ----------
-        sz_bot : float
-            Strike Zone Bottom
-        sz_top : float
-            Strike Zone Top
-        plate_x : float
-            Where Ball Passed the plate (horizontaL)
-        plate_z : float
-            Where Ball Passed the plate (vertical)
-
-    Returns
-    -------
-        dict
-            Dictionary of various coordinates needed for call calcs
-    """
-    return {
-        "W": (_ZONE_WIDTH),
-        "X1": -_ZONE_RADIUS,
-        "X2": (-_ZONE_RADIUS + (_ZONE_WIDTH)),
-        "Y1": (sz_bot - _BALL_RADIUS),
-        "Y2": (sz_top + _BALL_RADIUS),
-        "X": plate_x,
-        "Y": plate_z,
-    }
-
-
-def calc_adj_delta_win_exp(p: dict) -> float:
-    """Calc Adj Delta Win Exp
-
-    Calculates the impact to the team the call was against.
-
-    Parameters
-    ----------
-        p : dict
-            pitch information
-
-    Returns
-    -------
-        float
-            Delta Win Exp Change
-    """
-    if p.get("description") == "ball":
-        if p.get("inning_topbot") == "Bot" and p.get("delta_home_win_exp") > 0:
-            return abs(p.get("delta_home_win_exp"))
-        elif p.get("inning_topbot") == "Top" and p.get("delta_home_win_exp") < 0:
-            return abs(p.get("delta_home_win_exp"))
+    if p.description == "called_strike":
+        if X < X1:
+            horizontal_miss = round((X1 - X) * 12.00, 2)
+            horizontal_miss_type = "inside" if p.stand == "R" else "outside"
+        elif X > X2:
+            horizontal_miss = round((X - X2) * 12.00, 2)
+            horizontal_miss_type = "outside" if p.stand == "R" else "inside"
         else:
-            return 0.00
+            horizontal_miss = 0.00
+            horizontal_miss_type = None
 
-    elif p.get("description") == "called_strike":
-        if p.get("inning_topbot") == "Top" and p.get("delta_home_win_exp") > 0:
-            return abs(p.get("delta_home_win_exp"))
-        elif p.get("inning_topbot") == "Bot" and p.get("delta_home_win_exp") < 0:
-            return abs(p.get("delta_home_win_exp"))
+        if Y < Y1:
+            vertical_miss = round((Y1 - Y) * 12.00, 2)
+            vertical_miss_type = "low"
+        elif Y > Y2:
+            vertical_miss = round((Y - Y2) * 12.00, 2)
+            vertical_miss_type = "high"
         else:
-            return 0.00
+            vertical_miss = 0.00
+            vertical_miss_type = None
 
-    else:
-        return 0.00
+        if (horizontal_miss or vertical_miss) > 0:
+            if p.inning_topbot == "Top" and p.delta_home_win_exp > 0:
+                miss_delta_win_exp_impact = abs(p.delta_home_win_exp)
+            elif p.inning_topbot == "Bot" and p.delta_home_win_exp < 0:
+                miss_delta_win_exp_impact = abs(p.delta_home_win_exp)
+            else:
+                miss_delta_win_exp_impact = 0.00
+        else:
+            miss_delta_win_exp_impact = 0.00
 
+    elif p.description == "ball":
+        if (X1 < X and X < X2) and (Y1 < Y and Y < Y2):
+            if X <= 0:
+                horizontal_miss = round((X - X1) * 12.00, 2)
+                horizontal_miss_type = "inside" if p.stand == "R" else "outside"
+            elif X >= 0:
+                horizontal_miss = round((X2 - X) * 12.00, 2)
+                horizontal_miss_type = "outside" if p.stand == "R" else "inside"
+            else:
+                horizontal_miss = 0.00
+                horizontal_miss_type = None
 
-def calc_strike_miss(p: dict) -> Tuple:
-    """Calc Strike Miss
+            if Y <= (Y1 + ((Y2 - Y1) / 2)):
+                vertical_miss = round((Y - Y1) * 12.00, 2)
+                vertical_miss_type = "low"
+            elif Y >= (Y1 + ((Y2 - Y1) / 2)):
+                vertical_miss = round((Y2 - Y) * 12.00, 2)
+                vertical_miss_type = "high"
+            else:
+                vertical_miss = 0.00
+                vertical_miss_type = None
 
-    For a called strike, calculates whether the call was missed horizontally,
-    vertically, and the sum of both -- along with the delta_win_exp_impact
+            if horizontal_miss or vertical_miss > 0:
+                if p.inning_topbot == "Bot" and p.delta_home_win_exp > 0:
+                    miss_delta_win_exp_impact = abs(p.delta_home_win_exp)
+                elif p.inning_topbot == "Top" and p.delta_home_win_exp < 0:
+                    miss_delta_win_exp_impact = abs(p.delta_home_win_exp)
+                else:
+                    miss_delta_win_exp_impact = 0.00
+            else:
+                miss_delta_win_exp_impact = 0.00
 
-    Parameters
-    ----------
-        p : dict
-            pitch coordinate info
-
-    Returns
-    -------
-        Tuple
-            `miss_type` and `miss_inches` for
-                horizontal
-                vertical
-                total
-            also `miss_delta_win_exp_impact``
-    """
-    if p.get("X") < p.get("X1"):
-        horizontal_miss = round((p.get("X1") - p.get("X")) * 12.00, 2)
-        horizontal_miss_type = "inside" if p.get("stand") == "R" else "outside"
-    elif p.get("X") > p.get("X2"):
-        horizontal_miss = round((p.get("X") - p.get("X2")) * 12.00, 2)
-        horizontal_miss_type = "outside" if p.get("stand") == "R" else "inside"
-    else:
-        horizontal_miss = 0.00
-        horizontal_miss_type = None
-
-    if p.get("Y") < p.get("Y1"):
-        vertical_miss = round((p.get("Y1") - p.get("Y")) * 12.00, 2)
-        vertical_miss_type = "low"
-    elif p.get("Y") > p.get("Y2"):
-        vertical_miss = round((p.get("Y") - p.get("Y2")) * 12.00, 2)
-        vertical_miss_type = "high"
-    else:
-        vertical_miss = 0
-        vertical_miss_type = None
-
-    if horizontal_miss > 0 or vertical_miss > 0:
-        miss_delta_win_exp_impact = calc_adj_delta_win_exp(p)
-    else:
-        miss_delta_win_exp_impact = 0.00
+        else:
+            return tuple(DEFAULT_RETURN)
 
     total_miss = round(horizontal_miss + vertical_miss, 2)
-    total_miss_type = (
-        "both"
-        if horizontal_miss > 0 and vertical_miss > 0
-        else horizontal_miss_type
-        if horizontal_miss > 0
-        else vertical_miss_type
-        if vertical_miss > 0
-        else None
-    )
+
+    if horizontal_miss > 0 and vertical_miss > 0:
+        total_miss_type = "both"
+    elif horizontal_miss > 0:
+        total_miss_type = horizontal_miss_type
+    elif vertical_miss > 0:
+        total_miss_type = vertical_miss_type
+    else:
+        total_miss_type = None
+
     return (
         horizontal_miss_type,
         horizontal_miss,
@@ -165,132 +127,15 @@ def calc_strike_miss(p: dict) -> Tuple:
     )
 
 
-def calc_ball_miss(p: dict) -> Tuple:
-    """Calc Ball Miss
-
-    For a called ball, calculates whether the call was in the strike zone
-    horizontally, vertically or both. Also calculates delta_win_exp_impact
-
-    Parameters
-    ----------
-        p : dict
-            pitch coordinate info
-
-    Returns
-    -------
-        Tuple
-            `miss_type` and `miss_inches` for
-                horizontal
-                vertical
-                total
-            also `miss_delta_win_exp_impact``
-    """
-    if (p.get("X1") < p.get("X") and p.get("X") < p.get("X2")) and (
-        p.get("Y1") < p.get("Y") and p.get("Y") < p.get("Y2")
-    ):
-        if p.get("X") <= 0:
-            horizontal_miss = round((p.get("X") - p.get("X1")) * 12.00, 2)
-            horizontal_miss_type = "inside" if p.get("stand") == "R" else "outside"
-        elif p.get("X") >= 0:
-            horizontal_miss = round((p.get("X2") - p.get("X")) * 12.00, 2)
-            horizontal_miss_type = "outside" if p.get("stand") == "R" else "inside"
-
-        if p.get("Y") <= (p.get("sz_bot") + ((p.get("sz_top") - p.get("sz_bot")) / 2)):
-            vertical_miss = round((p.get("Y") - p.get("Y1")) * 12.00, 2)
-            vertical_miss_type = "low"
-        elif p.get("Y") >= (
-            p.get("sz_bot") + ((p.get("sz_top") - p.get("sz_bot")) / 2)
-        ):
-            vertical_miss = round((p.get("Y2") - p.get("Y")) * 12.00, 2)
-            vertical_miss_type = "high"
-
-        miss_delta_win_exp_impact = calc_adj_delta_win_exp(p)
-
-    else:
-        (
-            horizontal_miss,
-            horizontal_miss_type,
-            vertical_miss,
-            vertical_miss_type,
-            miss_delta_win_exp_impact,
-        ) = [0, None, 0, None, 0.00]
-
-    total_miss = round(min(horizontal_miss, vertical_miss), 2)
-    total_miss_type = (
-        "both"
-        if horizontal_miss > 0 and vertical_miss > 0
-        else horizontal_miss_type
-        if horizontal_miss > 0
-        else vertical_miss_type
-        if vertical_miss > 0
-        else None
-    )
-    return (
-        horizontal_miss_type,
-        horizontal_miss,
-        vertical_miss_type,
-        vertical_miss,
-        total_miss_type,
-        total_miss,
-        miss_delta_win_exp_impact,
-    )
-
-
-def calculate_miss(p: pd.Series) -> Tuple:
-    """Calculate Miss
-
-    Calculate miss fields based on row of statcast data
-    If any fields are missing, ignore the row and return Nones
-
-    Parameters
-    ----------
-        p : pd.Series
-            pitch (row in statcast dataframe)
-
-    Returns
-    -------
-        Tuple
-            "horizontal_miss_type",
-            "horizontal_miss",
-            "vertical_miss_type",
-            "vertical_miss",
-            "total_miss_type",
-            "total_miss",
-            "miss_delta_win_exp_impact",
-
-    """
-    if any(pd.isnull(v) for v in (p.plate_x, p.plate_z, p.sz_bot, p.sz_top)):
-        return ([None, 0.00] * 3) + [0.00]
-    elif any(v == 0 for v in (p.plate_x, p.plate_z, p.sz_bot, p.sz_top)):
-        return ([None, 0.00] * 3) + [0.00]
-    elif p.description not in _DESCRIPTIONS:
-        return ([None, 0.00] * 3) + [0.00]
-    else:
-        d = {x: getattr(p, x) for x in _USED_COLS}
-        d.update(generate_coords(p.sz_bot, p.sz_top, p.plate_x, p.plate_z))
-
-        if p.description == "called_strike":
-            return calc_strike_miss(d)
-        elif p.description == "ball":
-            return calc_ball_miss(d)
-
-
-def get_ump_calls(df: pd.DataFrame) -> pd.DataFrame:
-    """Get Ump Calls
-
-    Wrapper for all functions within umpire calls analysis
-
-    Parameters
-    ----------
-        df : pd.DataFrame
-            Dataframe to transform
-
-    Returns
-    -------
-        pd.DataFrame
-            Transformed dataframe
-    """
-    df[_RETURN_COLS] = df.swifter.apply(
-        lambda x: calculate_miss(x), axis=1, result_type="expand"
+def umpire_calls(df: pd.DataFrame) -> pd.DataFrame:
+    df[RETURN_COLUMNS] = df.swifter.apply(
+        lambda x: (
+            DEFAULT_RETURN
+            if any(pd.isnull(x[col]) for col in REQUIRED_COLUMNS)
+            or x.description not in FILTERED_DESCRIPTIONS
+            else (_umpire_calls(x))
+        ),
+        axis=1,
+        result_type="expand",
     )
     return df
